@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Clock3, Pause, Play, RotateCcw } from 'lucide-react';
 import { toast } from '@workspace/hsc-command-center-ds/hooks/use-toast';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@workspace/hsc-command-center-ds/components/ui/alert-dialog';
@@ -7,6 +7,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@work
 import { Label } from '@workspace/hsc-command-center-ds/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@workspace/hsc-command-center-ds/components/ui/select';
 import type { StudyData, StudyTimer } from '../lib/model';
+
+const POMODORO_SECONDS = 25 * 60;
 
 type StudyTimerProps = {
   data: StudyData;
@@ -34,6 +36,8 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
   const [subjectChoice, setSubjectChoice] = useState(data.subjects[0]?.id ?? 'none');
   const [chapterChoice, setChapterChoice] = useState('none');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [mode, setMode] = useState<'stopwatch' | 'pomodoro'>('stopwatch');
+  const autoFinishing = useRef(false);
   const timer = data.activeTimer;
 
   useEffect(() => {
@@ -59,6 +63,19 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
     }
   }, [chapterChoice, chapters]);
   const elapsed = timer ? runningSeconds(timer, now) : 0;
+  const targetSeconds = timer?.mode === 'pomodoro' ? timer.targetSeconds ?? POMODORO_SECONDS : null;
+  const remaining = targetSeconds ? Math.max(0, targetSeconds - elapsed) : null;
+
+  // Pomodoro: finish and save automatically when the focus block ends.
+  useEffect(() => {
+    if (!timer || timer.isPaused || !targetSeconds || autoFinishing.current) return;
+    if (elapsed >= targetSeconds) {
+      autoFinishing.current = true;
+      void finish(true);
+    }
+    // finish is recreated each render; the ref guards against repeat calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elapsed, targetSeconds, timer?.id, timer?.isPaused]);
   const timerSubject = timer?.subjectId
     ? data.subjects.find((subject) => subject.id === timer.subjectId)?.name ?? 'Subject removed'
     : 'General study';
@@ -76,6 +93,8 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
       elapsedSeconds: 0,
       resumedAt: timestamp,
       isPaused: false,
+      mode,
+      targetSeconds: mode === 'pomodoro' ? POMODORO_SECONDS : null,
     };
     try {
       await updateData((current) => ({ ...current, activeTimer: nextTimer }));
@@ -111,7 +130,7 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
     }
   };
 
-  const finish = async () => {
+  const finish = async (auto = false) => {
     if (!timer || elapsed < 1) return;
     const session = {
       id: timer.id,
@@ -119,15 +138,20 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
       chapterId: timer.chapterId,
       startedAt: timer.startedAt,
       durationMinutes: Math.min(1440, Math.max(1, Math.round(elapsed / 60))),
-      notes: 'Timed study session',
+      notes: timer.mode === 'pomodoro' ? 'Pomodoro focus block' : 'Timed study session',
     };
     try {
       await updateData((current) => current.activeTimer?.id !== timer.id
         ? current
         : { ...current, activeTimer: null, sessions: [...current.sessions, session] });
-      toast({ title: 'Study session saved', description: `${session.durationMinutes} minutes added to your study log.` });
+      toast({
+        title: auto ? 'Focus block complete' : 'Study session saved',
+        description: auto ? `${session.durationMinutes} minutes saved. Take a short break.` : `${session.durationMinutes} minutes added to your study log.`,
+      });
     } catch (error) {
       toast({ title: 'Could not save session', description: error instanceof Error ? error.message : 'Please try again.' });
+    } finally {
+      autoFinishing.current = false;
     }
   };
 
@@ -158,11 +182,15 @@ export function StudyTimerCard({ data, updateData }: StudyTimerProps) {
             <div className="space-y-1.5"><Label htmlFor="timer-subject">Subject (optional)</Label><Select value={subjectChoice} onValueChange={(value) => { setSubjectChoice(value); setChapterChoice('none'); }}><SelectTrigger id="timer-subject" data-testid="select-timer-subject"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">General study</SelectItem>{data.subjects.map((subject) => <SelectItem key={subject.id} value={subject.id}>{subject.name}</SelectItem>)}</SelectContent></Select></div>
             <div className="space-y-1.5"><Label htmlFor="timer-chapter">Chapter (optional)</Label><Select value={chapterChoice} onValueChange={setChapterChoice} disabled={subjectChoice === 'none' || chapters.length === 0}><SelectTrigger id="timer-chapter" data-testid="select-timer-chapter"><SelectValue placeholder="Choose a chapter" /></SelectTrigger><SelectContent><SelectItem value="none">No chapter</SelectItem>{chapters.map((chapter) => <SelectItem key={chapter.id} value={chapter.id}>{chapter.title}</SelectItem>)}</SelectContent></Select></div>
           </div>
-          <Button onClick={() => void start()} data-testid="button-start-study-timer"><Play /> Start timer</Button>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Timer mode">
+            <Button size="sm" variant={mode === 'stopwatch' ? 'default' : 'outline'} onClick={() => setMode('stopwatch')} aria-pressed={mode === 'stopwatch'}>Stopwatch</Button>
+            <Button size="sm" variant={mode === 'pomodoro' ? 'default' : 'outline'} onClick={() => setMode('pomodoro')} aria-pressed={mode === 'pomodoro'}>Pomodoro · 25 min</Button>
+          </div>
+          <Button onClick={() => void start()} data-testid="button-start-study-timer"><Play /> {mode === 'pomodoro' ? 'Start focus block' : 'Start timer'}</Button>
         </> : <>
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 p-4">
             <div><p className="font-medium">{timerSubject}{timerChapter ? ` · ${timerChapter}` : ''}</p><p className="text-xs text-muted-foreground">{timer.isPaused ? 'Paused · elapsed time is saved' : 'Timer is running'}</p></div>
-            <p className="font-mono text-3xl font-semibold tabular-nums" role="timer" aria-live="off" data-testid="text-timer-elapsed">{clockLabel(elapsed)}</p>
+            <p className="font-mono text-3xl font-semibold tabular-nums" role="timer" aria-live="off" data-testid="text-timer-elapsed">{clockLabel(remaining ?? elapsed)}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {timer.isPaused
