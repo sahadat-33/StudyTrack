@@ -1,1 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "HSC 2027 Command Center"
+description = "A private, local-first study planner and progress tracker for HSC students. Track syllabus coverage, practice, revisions, study sessions, exams, and results; use it offline, back up data as versioned JSON, and optionally enable reminders without accounts or cloud sync."
+version = "1.0.0"
+id = "artifacts/hsc-command-center"
+router = "path"
 
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23037
+
+[services.development]
+run = "pnpm --filter @workspace/hsc-command-center run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hsc-command-center", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/hsc-command-center/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23037"
+BASE_PATH = "/"
