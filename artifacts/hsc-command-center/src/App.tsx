@@ -23,7 +23,9 @@ import { downloadBackup, parseBackupJson } from './lib/backup';
 import { resetStudyData, getStudyData, replaceStudyData, updateStudyData } from './lib/study-store';
 import { revisionOffsets } from './lib/model';
 import type { RevisionItem, StudyData, StudyTimer } from './lib/model';
-import { GENERAL_PAPER, SYLLABUS_TEMPLATE, parseSyllabusFile, type ImportResult } from './lib/syllabus-import';
+import { GENERAL_PAPER, SYLLABUS_TEMPLATE, parseSyllabusFile, splitCsvLine, type ImportResult } from './lib/syllabus-import';
+import { LOG_TEMPLATE, logsToCsv, parseLogTable, type LogImportResult } from './lib/logs-import';
+import { readFirstSheet } from './lib/xlsx-read';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type EntityKind = 'subjects' | 'papers' | 'chapters' | 'tasks' | 'sessions' | 'practices' | 'revisions' | 'exams' | 'results';
@@ -511,6 +513,163 @@ function SyllabusImportButton() {
   </>;
 }
 
+function downloadText(filename: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function LogImportButton() {
+  const { update } = useStudy();
+  const [open, setOpen] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [result, setResult] = useState<LogImportResult | null>(null);
+  const [reading, setReading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const readFile = async (file?: File) => {
+    setResult(null);
+    setFileName('');
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      setResult({ rows: [], errors: ['This file is larger than 2 MB.'], duplicates: 0 });
+      return;
+    }
+    setFileName(file.name);
+    setReading(true);
+    try {
+      const table = /\.csv$/i.test(file.name)
+        ? (await file.text()).replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim()).map(splitCsvLine)
+        : await readFirstSheet(file);
+      setResult(parseLogTable(table));
+    } catch (error) {
+      setResult({ rows: [], errors: [error instanceof Error ? error.message : 'This file could not be read.'], duplicates: 0 });
+    } finally {
+      setReading(false);
+    }
+  };
+  const importRows = async () => {
+    if (!result?.rows.length) return;
+    const incoming = result.rows;
+    setSaving(true);
+    try {
+      await update((current) => {
+        const merged = new Map<string, StudyData['dailyLogs'][number]>(current.dailyLogs.map((log) => [log.date, log] as const));
+        for (const row of incoming) {
+          const existing = merged.get(row.date);
+          merged.set(row.date, {
+            date: row.date,
+            screenMinutes: row.screenMinutes ?? existing?.screenMinutes ?? null,
+            studyMinutes: row.studyMinutes ?? existing?.studyMinutes ?? null,
+          });
+        }
+        return { ...current, dailyLogs: [...merged.values()].sort((a, b) => a.date.localeCompare(b.date)) };
+      });
+      toast({ title: 'Logs imported', description: `${incoming.length} day${incoming.length === 1 ? '' : 's'} updated. Matching dates were replaced.` });
+      setOpen(false);
+      setResult(null);
+    } catch (error) {
+      toast({ title: 'Import failed', description: error instanceof Error ? error.message : 'Please try again.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <>
+    <Button variant="outline" size="sm" onClick={() => setOpen(true)} data-testid="button-import-logs"><ArrowDownToLine /> Import file</Button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Import screen and study time</DialogTitle>
+          <DialogDescription>Use an .xlsx or .csv file with columns: Date, Screen time, Study time. Times can be 135 (minutes), 2h 15m, or 2:15. Dates can be 2026-11-24 or 24/11/2026.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <Input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => void readFile(event.target.files?.[0])} data-testid="input-logs-file" />
+          <Button variant="ghost" size="sm" onClick={() => downloadText('screen-and-study-template.csv', LOG_TEMPLATE)}>Download a template</Button>
+          {reading && <p className="text-sm text-muted-foreground">Reading {fileName}…</p>}
+          {result && result.errors.length > 0 && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm"><p className="font-medium">Some rows need fixing</p><ul className="mt-2 max-h-40 list-none space-y-1 overflow-y-auto text-xs">{result.errors.slice(0, 20).map((error) => <li key={error}>{error}</li>)}</ul></div>}
+          {result && result.rows.length > 0 && <p className="text-sm text-muted-foreground" data-testid="text-logs-preview"><span className="font-medium text-foreground">{result.rows.length} days</span> from {fileName}{result.duplicates ? ` · ${result.duplicates} repeated dates used the last row` : ''}.</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => void importRows()} disabled={!result?.rows.length || saving || reading} data-testid="button-confirm-logs">{saving ? 'Importing…' : `Import ${result?.rows.length ?? 0} days`}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>;
+}
+
+const weekStartISO = (date: string) => {
+  const value = new Date(`${date}T00:00:00Z`);
+  const offset = (value.getUTCDay() + 6) % 7;
+  value.setUTCDate(value.getUTCDate() - offset);
+  return value.toISOString().slice(0, 10);
+};
+
+function ScreenStudySection({ data }: { data: StudyData }) {
+  const logs = [...data.dailyLogs].sort((a, b) => a.date.localeCompare(b.date));
+  const screenDays = logs.filter((log) => log.screenMinutes !== null);
+  const studyDays = logs.filter((log) => log.studyMinutes !== null);
+  const bothDays = logs.filter((log) => log.screenMinutes !== null && log.studyMinutes !== null);
+  const average = (items: typeof logs, key: 'screenMinutes' | 'studyMinutes') => items.length ? Math.round(items.reduce((sum, item) => sum + (item[key] ?? 0), 0) / items.length) : null;
+  const avgScreen = average(screenDays, 'screenMinutes');
+  const avgStudy = average(studyDays, 'studyMinutes');
+  const bothScreen = bothDays.reduce((sum, log) => sum + (log.screenMinutes ?? 0), 0);
+  const bothStudy = bothDays.reduce((sum, log) => sum + (log.studyMinutes ?? 0), 0);
+  const sharePercent = bothScreen ? Math.round(bothStudy / bothScreen * 100) : null;
+
+  const daily = logs.slice(-30).map((log) => ({
+    day: log.date.slice(5),
+    screen: log.screenMinutes === null ? null : Math.round(log.screenMinutes / 6) / 10,
+    study: log.studyMinutes === null ? null : Math.round(log.studyMinutes / 6) / 10,
+  }));
+
+  const weeks = new Map<string, { screen: number[]; study: number[] }>();
+  for (const log of logs) {
+    const key = weekStartISO(log.date);
+    const week = weeks.get(key) ?? { screen: [], study: [] };
+    if (log.screenMinutes !== null) week.screen.push(log.screenMinutes);
+    if (log.studyMinutes !== null) week.study.push(log.studyMinutes);
+    weeks.set(key, week);
+  }
+  const weekly = [...weeks.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-8).map(([start, week]) => ({
+    week: start.slice(5),
+    screen: week.screen.length ? Math.round(week.screen.reduce((sum, value) => sum + value, 0) / week.screen.length / 6) / 10 : null,
+    study: week.study.length ? Math.round(week.study.reduce((sum, value) => sum + value, 0) / week.study.length / 6) / 10 : null,
+  }));
+
+  const exportLogs = () => {
+    if (!logs.length) {
+      toast({ title: 'Nothing to export', description: 'Import a file first.' });
+      return;
+    }
+    downloadText(`screen-and-study-${todayISO()}.csv`, logsToCsv(logs));
+  };
+
+  return <section className="mt-8 space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><h2 className="text-lg font-semibold">Screen time and study time</h2><p className="text-sm text-muted-foreground">From the file you imported. Nothing here is estimated.</p></div>
+      <div className="flex flex-wrap gap-2"><LogImportButton /><Button variant="outline" size="sm" onClick={exportLogs} data-testid="button-export-logs"><ArrowDownToLine /> Export CSV</Button></div>
+    </div>
+    {logs.length === 0 ? <EmptyBlock icon={<Clock3 />} title="No screen or study data yet" description="Prepare a file with Date, Screen time, and Study time columns, then import it here." action={<LogImportButton />} /> : <>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <MetricCard label="Average screen time" value={avgScreen === null ? '—' : minutesLabel(avgScreen)} detail={`per day, from ${screenDays.length} day${screenDays.length === 1 ? '' : 's'}`} icon={<Activity />} />
+        <MetricCard label="Average study time" value={avgStudy === null ? '—' : minutesLabel(avgStudy)} detail={`per day, from ${studyDays.length} day${studyDays.length === 1 ? '' : 's'}`} icon={<Clock3 />} />
+        <MetricCard label="Study as share of screen" value={sharePercent === null ? '—' : `${sharePercent}%`} detail={bothDays.length ? `on ${bothDays.length} day${bothDays.length === 1 ? '' : 's'} with both values` : 'Needs days with both values'} icon={<ChartNoAxesCombined />} />
+      </div>
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Card><CardHeader><CardTitle>Last 30 days</CardTitle><CardDescription>Hours per day, screen and study side by side.</CardDescription></CardHeader><CardContent>
+          <div className="h-60 w-full" data-testid="chart-screen-vs-study-daily"><ResponsiveContainer width="100%" height="100%"><BarChart data={daily} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" /><XAxis dataKey="day" tick={{ fontSize: 10 }} interval="preserveStartEnd" /><YAxis tick={{ fontSize: 11 }} unit="h" /><Tooltip formatter={(value: number) => `${value} h`} /><Legend wrapperStyle={{ fontSize: 12 }} /><Bar dataKey="screen" name="Screen time" fill="hsl(var(--muted-foreground))" radius={[3, 3, 0, 0]} /><Bar dataKey="study" name="Study time" fill="currentColor" className="text-primary" radius={[3, 3, 0, 0]} /></BarChart></ResponsiveContainer></div>
+        </CardContent></Card>
+        <Card><CardHeader><CardTitle>Weekly average per day</CardTitle><CardDescription>Last 8 weeks, weeks start on Monday.</CardDescription></CardHeader><CardContent>
+          <div className="h-60 w-full" data-testid="chart-screen-vs-study-weekly"><ResponsiveContainer width="100%" height="100%"><BarChart data={weekly} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" /><XAxis dataKey="week" tick={{ fontSize: 10 }} /><YAxis tick={{ fontSize: 11 }} unit="h" /><Tooltip formatter={(value: number) => `${value} h`} /><Legend wrapperStyle={{ fontSize: 12 }} /><Bar dataKey="screen" name="Screen time" fill="hsl(var(--muted-foreground))" radius={[3, 3, 0, 0]} /><Bar dataKey="study" name="Study time" fill="currentColor" className="text-primary" radius={[3, 3, 0, 0]} /></BarChart></ResponsiveContainer></div>
+        </CardContent></Card>
+      </div>
+    </>}
+  </section>;
+}
+
 function StudyCharts({ data }: { data: StudyData }) {
   const today = todayISO();
   const days = Array.from({ length: 14 }, (_, index) => addDhakaDays(today, index - 13));
@@ -626,6 +785,7 @@ function AnalyticsPage() {
     <h2 className="mb-3 text-lg font-semibold">Coverage & study activity</h2>
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Syllabus coverage" value={coverage === null ? '—' : `${coverage}%`} detail={chapterCount ? `${completed} of ${chapterCount} chapters marked complete` : 'No included chapters recorded'} icon={<BookOpen />} /><MetricCard label="Study logged" value={minutesLabel(data.sessions.reduce((sum, item) => sum + item.durationMinutes, 0))} detail={`${data.sessions.length} sessions logged`} icon={<Clock3 />} /><MetricCard label="Practice accuracy" value={accuracy === null ? '—' : `${accuracy}%`} detail={practiceCount ? `${correctCount} correct of ${practiceCount} questions` : data.practices.length ? 'No question counts entered' : 'No practice attempts recorded'} icon={<Check />} /><MetricCard label="Chapter confidence" value={chapterConfidence === null ? '—' : `${chapterConfidence} / 5`} detail={ratedChapters.length ? `self-rated across ${ratedChapters.length} chapters` : 'No chapter ratings recorded'} icon={<Activity />} /><MetricCard label="Practice self-rating" value={practiceConfidence === null ? '—' : `${practiceConfidence} / 5`} detail={data.practices.length ? `from ${data.practices.length} practice records` : 'No practice ratings recorded'} icon={<Activity />} /></div>
     <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><MetricCard label="Revision reviewed" value={data.revisions.length ? `${revisionReviewed} / ${data.revisions.length}` : '—'} detail={data.revisions.length ? 'revision records marked reviewed' : 'No revision items recorded'} icon={<RotateCcw />} /><MetricCard label="Exam results" value={resultPercent === null ? '—' : `${resultPercent}%`} detail={resultCount ? `combined score from ${resultCount} results (${totalScore} / ${totalMax})` : 'No exam results recorded'} icon={<Trophy />} /><MetricCard label="Practice records" value={`${data.practices.length}`} detail={`${practiceCount} total questions attempted`} icon={<FileText />} /></div>
+    <ScreenStudySection data={data} />
     <StudyCharts data={data} />
     <div className="mt-6 flex items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Practice log</h2><p className="text-sm text-muted-foreground">Accuracy and confidence are recorded independently for each attempt.</p></div><Button size="sm" variant="outline" onClick={() => editPractice()} data-testid="button-add-practice-inline"><Plus /> Add</Button></div>
     {data.practices.length === 0 ? <div className="mt-3"><EmptyBlock icon={<FileText />} title="No practice records" description="Record question counts and a separate confidence rating to start a meaningful practice summary." action={<Button onClick={() => editPractice()}><Plus /> Log practice</Button>} /></div> : <div className="mt-3 space-y-3">{[...data.practices].sort((a, b) => b.date.localeCompare(a.date)).map((practice) => {
