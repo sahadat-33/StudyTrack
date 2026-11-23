@@ -1,1 +1,19 @@
+kind = "design-system"
+previewPath = "/hsc-command-center-ds/"
+title = "HSC Command Center Design System"
+description = "A reusable design system for the HSC 2027 Command Center, a focused, mobile-first study planner for HSC students. It defines clear, accessible light and dark themes with restrained navy, teal, and amber accents."
+version = "1.0.0"
+id = "artifacts/hsc-command-center-ds"
+router = "path"
 
+[[services]]
+name = "web"
+paths = [ "/hsc-command-center-ds/" ]
+localPort = 23836
+
+[services.development]
+run = "pnpm --filter @workspace/hsc-command-center-ds run dev"
+
+[services.env]
+PORT = "23836"
+BASE_PATH = "/hsc-command-center-ds/"
