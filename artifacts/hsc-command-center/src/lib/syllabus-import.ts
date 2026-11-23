@@ -13,7 +13,7 @@ const MAX_SUBJECT = 100;
 const MAX_CHAPTER = 160;
 export const GENERAL_PAPER = 'General';
 
-function splitCsvLine(line: string): string[] {
+export function splitCsvLine(line: string): string[] {
   const cells: string[] = [];
   let current = '';
   let quoted = false;

@@ -138,6 +138,13 @@ export const SettingsSchema = z.object({
   timezone: z.literal('Asia/Dhaka'),
 });
 
+// Daily screen time and study time, imported from a file you prepare (not logged in-app).
+export const DailyLogSchema = z.object({
+  date: DateOnly,
+  screenMinutes: z.number().int().min(0).max(1440).nullable(),
+  studyMinutes: z.number().int().min(0).max(1440).nullable(),
+});
+
 export const StudyDataSchema = z
   .object({
     schemaVersion: z.literal(2),
@@ -152,6 +159,7 @@ export const StudyDataSchema = z
     exams: z.array(ExamSchema).max(5000),
     results: z.array(ResultSchema).max(10000),
     activeTimer: ActiveTimerSchema.nullable().default(null),
+    dailyLogs: z.array(DailyLogSchema).max(5000).default([]),
     lastUpdatedAt: z.string().datetime(),
   })
   .superRefine((data, context) => {
@@ -416,6 +424,7 @@ export function createInitialStudyData(): StudyData {
     exams: [],
     results: [],
     activeTimer: null,
+    dailyLogs: [],
     lastUpdatedAt: new Date().toISOString(),
   });
 }
@@ -460,5 +469,6 @@ function migrateStudyData(value: unknown): unknown {
       venue: '',
     }),
     activeTimer: null,
+    dailyLogs: [],
   };
 }
