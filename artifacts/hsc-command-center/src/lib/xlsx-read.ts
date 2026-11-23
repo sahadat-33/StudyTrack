@@ -95,7 +95,15 @@ export function parseSheetXml(xml: string, strings: string[]): SheetRows {
         value = decodeXml([...content.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((part) => part[1]).join(''));
       } else {
         const raw = content.match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? '';
-        value = type === 's' ? strings[Number(raw)] ?? '' : decodeXml(raw);
+        if (type === 's') {
+          value = strings[Number(raw)] ?? '';
+        } else if (raw !== '' && /^\d*\.?\d+$/.test(raw) && Number(raw) > 0 && Number(raw) < 1) {
+          // Excel stores a time such as 10:24 as a fraction of a day (0.4333).
+          // A value under 1 can only be a time, so convert it to whole minutes.
+          value = String(Math.round(Number(raw) * 1440));
+        } else {
+          value = decodeXml(raw);
+        }
       }
       while (cells.length < index) cells.push('');
       cells[index] = value.trim();
