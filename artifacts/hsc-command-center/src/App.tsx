@@ -136,10 +136,9 @@ const prettyDate = (value: string) => {
 
 const NAV_ITEMS = [
   { href: '/', label: 'Home', icon: House },
-  { href: '/syllabus', label: 'Syllabus', icon: BookOpen },
-  { href: '/planner', label: 'Planner', icon: CalendarDays },
-  { href: '/analytics', label: 'Analytics', icon: ChartNoAxesCombined },
-  { href: '/more', label: 'More', icon: MoreHorizontal },
+  { href: '/planner', label: 'Study', icon: CalendarDays },
+  { href: '/analytics', label: 'Progress', icon: ChartNoAxesCombined },
+  { href: '/settings', label: 'Settings', icon: Settings2 },
 ];
 const MORE_ITEMS = [
   { href: '/reminders', label: 'Reminders', detail: 'Due tasks, reviews, and upcoming exams', icon: Bell },
@@ -276,19 +275,14 @@ function AppShell({ children }: { children: ReactNode }) {
         <nav className="flex-1 space-y-1 p-3" aria-label="Main navigation">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => <NavLink key={href} href={href} label={label} icon={<Icon className="size-4" />} active={active === label} />)}
         </nav>
-        <div className="m-3 rounded-lg border bg-muted/50 p-3 text-xs text-muted-foreground">
-          <div className="mb-1 flex items-center gap-2 font-medium text-foreground"><ShieldCheck className="size-4 text-primary" /> Stored on this device</div>
-          Your study records remain in this browser’s IndexedDB.
-        </div>
       </aside>
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b bg-background/95 px-4 backdrop-blur md:px-8">
           <div className="flex items-center gap-2 md:hidden"><span className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground"><GraduationCap className="size-4" /></span><span className="text-sm font-semibold">HSC 2027</span></div>
-          <div className="hidden text-sm text-muted-foreground md:block">Your plans, your pace.</div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground"><Badge variant={online ? 'outline' : 'secondary'} aria-live="polite" aria-label={online ? 'Browser online; records are stored on this device' : 'Offline; records remain available on this device'}>{online ? 'Online' : 'Offline'}</Badge><ShieldCheck className="size-4 text-primary" /><span className="hidden sm:inline">Private · on this device</span><span className="sm:hidden">On this device</span></div>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10 md:pt-8">{children}</main>
-        <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t bg-background/95 px-1 pb-1 pt-1 backdrop-blur md:hidden" aria-label="Mobile navigation">
+        <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-background/95 px-1 pb-1 pt-1 backdrop-blur md:hidden" aria-label="Mobile navigation">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => <Link key={href} href={href} className={cn('flex min-h-14 flex-col items-center justify-center gap-1 rounded-md text-xs no-underline', location === href ? 'text-primary' : 'text-muted-foreground')} aria-current={location === href ? 'page' : undefined} data-testid={`link-mobile-${label.toLowerCase()}`}><Icon className="size-4" /><span>{label}</span></Link>)}
         </nav>
       </div>
@@ -360,7 +354,6 @@ function HomePage() {
           <div><div className="mb-2 flex items-center justify-between text-sm"><span>Study time today</span><span className="text-muted-foreground">{planned ? `${Math.min(100, Math.round(todayMinutes / planned * 100))}% of ${minutesLabel(planned)}` : 'No daily target set'}</span></div>{planned ? <Progress value={Math.min(100, todayMinutes / planned * 100)} /> : <p className="text-xs text-muted-foreground">Set a daily target in Settings to compare time.</p>}</div>
           <p className="border-t pt-3 text-xs text-muted-foreground">Practice accuracy, confidence, revision, and exam results are tracked separately in Analytics.</p>
         </CardContent></Card>
-         <Card><CardContent className="flex items-center gap-3 p-4"><ShieldCheck className="size-5 shrink-0 text-primary" /><p className="text-sm text-muted-foreground">Study records stay in this browser. The network is used only to load or update the app.</p><Button size="sm" variant="outline" asChild><Link href="/reminders">Reminders</Link></Button></CardContent></Card>
       </div>
     </div>
   </PageContent>;
@@ -412,7 +405,8 @@ function PlannerPage() {
   const upcoming = data.tasks.filter((task) => task.date >= todayISO()).sort((a, b) => a.date.localeCompare(b.date) || priorityRank[a.priority] - priorityRank[b.priority]);
   const pastTasks = data.tasks.filter((task) => task.date < todayISO()).sort((a, b) => b.date.localeCompare(a.date) || priorityRank[a.priority] - priorityRank[b.priority]);
   const sessions = [...data.sessions].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-  return <PageContent><PageHeading eyebrow="Plan & log" title="Planner" description="Tasks are intentions. Study sessions are logged activity; they are not automatically inferred from tasks." action={<div className="flex gap-2"><Button variant="outline" onClick={() => edit('sessions')} data-testid="button-add-session"><Clock3 /> Log session</Button><Button onClick={() => edit('tasks')} data-testid="button-add-task"><Plus /> Add task</Button></div>} />
+  return <PageContent><PageHeading eyebrow="Plan & log" title="Study" description="Tasks are intentions. Study sessions are logged activity; they are not automatically inferred from tasks." action={<div className="flex gap-2"><Button variant="outline" onClick={() => edit('sessions')} data-testid="button-add-session"><Clock3 /> Log session</Button><Button onClick={() => edit('tasks')} data-testid="button-add-task"><Plus /> Add task</Button></div>} />
+    <div className="mb-5 flex flex-wrap gap-2">{[['/syllabus', 'Syllabus', BookOpen], ['/revision', 'Revision', RotateCcw], ['/exams', 'Exams', CalendarDays], ['/results', 'Results', Trophy], ['/reminders', 'Reminders', Bell]].map(([href, label, Icon]) => <Button key={href as string} variant="outline" size="sm" asChild><Link href={href as string}><Icon className="size-4" /> {label as string}</Link></Button>)}</div>
     <div className="mb-5"><StudyTimerCard data={data} updateData={update} /></div>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><MetricCard label="Upcoming tasks" value={`${upcoming.length}`} detail="planned by you" icon={<CalendarDays />} /><MetricCard label="Logged sessions" value={`${data.sessions.length}`} detail="actual entries, not estimates" icon={<Clock3 />} /><MetricCard label="Time logged" value={minutesLabel(data.sessions.reduce((sum, item) => sum + item.durationMinutes, 0))} detail="across all recorded sessions" icon={<Activity />} /></div>
     <div className="grid gap-5 lg:grid-cols-2"><section><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">Upcoming tasks</h2><Button size="sm" variant="ghost" onClick={() => edit('tasks')} data-testid="button-plan-task-inline"><Plus /> Add</Button></div>
