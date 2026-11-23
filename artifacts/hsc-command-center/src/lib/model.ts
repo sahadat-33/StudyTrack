@@ -40,6 +40,8 @@ export const ChapterSchema = z.object({
   source: z.string().max(240).default(''),
   syllabusVersion: z.string().max(80).default(''),
   lastVerifiedAt: DateOnly.nullable().default(null),
+  readAt: DateOnly.nullable().default(null),
+  readDifficulty: z.enum(['hard', 'okay', 'easy']).nullable().default(null),
   notes: Note,
 });
 
@@ -97,7 +99,14 @@ export const ActiveTimerSchema = z.object({
   elapsedSeconds: z.number().int().min(0).max(31_536_000),
   resumedAt: z.string().datetime().nullable(),
   isPaused: z.boolean(),
+  mode: z.enum(['stopwatch', 'pomodoro']).default('stopwatch'),
+  targetSeconds: z.number().int().min(60).max(31_536_000).nullable().default(null),
 });
+
+// Revision reminders, counted from the day a chapter is marked read.
+// Hard and Okay: day 7, 15 and 30. Easy: day 7 and 30.
+export const revisionOffsets = (difficulty: 'hard' | 'okay' | 'easy'): number[] =>
+  difficulty === 'easy' ? [7, 30] : [7, 15, 30];
 
 export const ExamSchema = z.object({
   id: Id,
