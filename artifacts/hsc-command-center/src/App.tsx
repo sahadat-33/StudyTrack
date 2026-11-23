@@ -21,7 +21,10 @@ import { toast } from '@workspace/hsc-command-center-ds/hooks/use-toast';
 import { cn } from '@workspace/hsc-command-center-ds/lib/utils';
 import { downloadBackup, parseBackupJson } from './lib/backup';
 import { resetStudyData, getStudyData, replaceStudyData, updateStudyData } from './lib/study-store';
+import { revisionOffsets } from './lib/model';
 import type { RevisionItem, StudyData, StudyTimer } from './lib/model';
+import { GENERAL_PAPER, SYLLABUS_TEMPLATE, parseSyllabusFile, type ImportResult } from './lib/syllabus-import';
+import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type EntityKind = 'subjects' | 'papers' | 'chapters' | 'tasks' | 'sessions' | 'practices' | 'revisions' | 'exams' | 'results';
 type EntityRecord = { id: string; [key: string]: unknown };
@@ -369,6 +372,166 @@ function TaskRow({ task, onEdit }: { task: StudyData['tasks'][number]; onEdit: (
   </div>;
 }
 
+function MarkReadControl({ chapter }: { chapter: StudyData['chapters'][number] }) {
+  const { update } = useStudy();
+  const [busy, setBusy] = useState(false);
+  if (chapter.readAt) {
+    return <span className="text-xs text-muted-foreground" data-testid={`text-read-${chapter.id}`}>Read {prettyDate(chapter.readAt)}{chapter.readDifficulty ? ` · ${titleCase(chapter.readDifficulty)}` : ''}</span>;
+  }
+  const markRead = async (difficulty: 'hard' | 'okay' | 'easy') => {
+    const today = todayISO();
+    const offsets = revisionOffsets(difficulty);
+    setBusy(true);
+    try {
+      await update((current) => {
+        const schedule: RevisionItem[] = offsets.map((days) => ({
+          id: makeId(),
+          title: `${chapter.title} · day ${days}`,
+          subjectId: chapter.subjectId,
+          chapterId: chapter.id,
+          dueDate: addDhakaDays(today, days),
+          intervalDays: days,
+          lastReviewedAt: null,
+          status: 'scheduled',
+          reviewResult: null,
+        }));
+        return {
+          ...current,
+          chapters: current.chapters.map((item) => item.id === chapter.id ? { ...item, readAt: today, readDifficulty: difficulty } : item),
+          revisions: [...current.revisions, ...schedule],
+        };
+      });
+      toast({ title: 'Chapter marked read', description: `Reminders set for day ${offsets.join(', ')}.` });
+    } catch (error) {
+      toast({ title: 'Could not mark chapter', description: error instanceof Error ? error.message : 'Please try again.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="flex items-center gap-1" aria-label={`Mark ${chapter.title} as read`}>
+    {(['hard', 'okay', 'easy'] as const).map((difficulty) => <Button key={difficulty} size="sm" variant="outline" disabled={busy} onClick={() => void markRead(difficulty)} data-testid={`button-read-${difficulty}-${chapter.id}`}>{titleCase(difficulty)}</Button>)}
+  </div>;
+}
+
+function SyllabusImportButton() {
+  const { data, update } = useStudy();
+  const [open, setOpen] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [saving, setSaving] = useState(false);
+  const readFile = async (file?: File) => {
+    setResult(null);
+    setFileName('');
+    if (!file) return;
+    if (file.size > 512 * 1024) {
+      setResult({ rows: [], errors: ['This file is larger than 512 KB.'] });
+      return;
+    }
+    setFileName(file.name);
+    setResult(parseSyllabusFile(await file.text(), file.name));
+  };
+  const downloadTemplate = () => {
+    const url = URL.createObjectURL(new Blob([SYLLABUS_TEMPLATE], { type: 'text/csv' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'syllabus-template.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  const importRows = async () => {
+    if (!result?.rows.length) return;
+    const rows = result.rows;
+    setSaving(true);
+    let added = 0;
+    let skipped = 0;
+    try {
+      await update((current) => {
+        const next: StudyData = { ...current, subjects: [...current.subjects], papers: [...current.papers], chapters: [...current.chapters] };
+        added = 0;
+        skipped = 0;
+        for (const row of rows) {
+          let subject = next.subjects.find((item) => item.name.toLowerCase() === row.subject.toLowerCase());
+          if (!subject) {
+            subject = { id: makeId(), name: row.subject, isProvisional: false, isArchived: false, targetPercent: null };
+            next.subjects.push(subject);
+          }
+          const subjectId = subject.id;
+          let paper = next.papers.find((item) => item.subjectId === subjectId && item.name.toLowerCase() === row.paper.toLowerCase());
+          if (!paper) {
+            paper = { id: makeId(), subjectId, name: row.paper || GENERAL_PAPER, isProvisional: false };
+            next.papers.push(paper);
+          }
+          const paperId = paper.id;
+          const exists = next.chapters.some((item) => item.subjectId === subjectId && item.title.toLowerCase() === row.chapter.toLowerCase());
+          if (exists) {
+            skipped += 1;
+            continue;
+          }
+          next.chapters.push({
+            id: makeId(), subjectId, paperId, title: row.chapter,
+            sortOrder: next.chapters.filter((item) => item.subjectId === subjectId).length,
+            status: 'not-started', confidence: null, isOptional: false, isExcluded: false, isArchived: false,
+            isProvisional: true, source: `Imported from ${fileName}`, syllabusVersion: '', lastVerifiedAt: null,
+            readAt: null, readDifficulty: null, notes: '',
+          });
+          added += 1;
+        }
+        return next;
+      });
+      toast({ title: 'Syllabus imported', description: `${added} chapter${added === 1 ? '' : 's'} added${skipped ? `, ${skipped} already existed` : ''}.` });
+      setOpen(false);
+      setResult(null);
+    } catch (error) {
+      toast({ title: 'Import failed', description: error instanceof Error ? error.message : 'Please try again.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+  const subjectCount = result ? new Set(result.rows.map((row) => row.subject.toLowerCase())).size : 0;
+  return <>
+    <Button variant="outline" onClick={() => setOpen(true)} data-testid="button-import-syllabus"><ArrowDownToLine /> Import</Button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Import syllabus</DialogTitle>
+          <DialogDescription>Upload a CSV or TXT file with one chapter per line: subject, paper, chapter. Existing chapters with the same name are skipped.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <Input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={(event) => void readFile(event.target.files?.[0])} data-testid="input-syllabus-file" />
+          <Button variant="ghost" size="sm" onClick={downloadTemplate}>Download a template</Button>
+          {result && result.errors.length > 0 && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm"><p className="font-medium">Some lines need fixing</p><ul className="mt-2 max-h-40 list-none space-y-1 overflow-y-auto text-xs">{result.errors.slice(0, 20).map((error) => <li key={error}>{error}</li>)}</ul></div>}
+          {result && result.rows.length > 0 && <p className="text-sm text-muted-foreground" data-testid="text-import-preview"><span className="font-medium text-foreground">{result.rows.length} chapters</span> in {subjectCount} subject{subjectCount === 1 ? '' : 's'} from {fileName}.</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => void importRows()} disabled={!result?.rows.length || saving} data-testid="button-confirm-import">{saving ? 'Importing…' : `Import ${result?.rows.length ?? 0} chapters`}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>;
+}
+
+function StudyCharts({ data }: { data: StudyData }) {
+  const today = todayISO();
+  const days = Array.from({ length: 14 }, (_, index) => addDhakaDays(today, index - 13));
+  const dailyMinutes = days.map((day) => ({
+    day: day.slice(5),
+    minutes: data.sessions.filter((session) => dateInDhaka(session.startedAt) === day).reduce((sum, session) => sum + session.durationMinutes, 0),
+  }));
+  const bySubject = data.subjects.filter((subject) => !subject.isArchived).map((subject) => {
+    const included = data.chapters.filter((chapter) => chapter.subjectId === subject.id && !chapter.isOptional && !chapter.isExcluded && !chapter.isArchived);
+    return { subject: subject.name, total: included.length, complete: included.filter((chapter) => chapter.status === 'complete').length };
+  }).filter((row) => row.total > 0);
+  return <div className="mt-6 grid gap-5 lg:grid-cols-2">
+    <Card><CardHeader><CardTitle>Study minutes</CardTitle><CardDescription>Last 14 days, from sessions you logged or timed.</CardDescription></CardHeader><CardContent>
+      <div className="h-56 w-full text-primary" data-testid="chart-study-minutes"><ResponsiveContainer width="100%" height="100%"><BarChart data={dailyMinutes} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" /><XAxis dataKey="day" tick={{ fontSize: 11 }} interval={1} /><YAxis tick={{ fontSize: 11 }} allowDecimals={false} /><Tooltip /><Bar dataKey="minutes" name="Minutes" fill="currentColor" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div>
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>Chapters by subject</CardTitle><CardDescription>Included chapters, and how many are complete.</CardDescription></CardHeader><CardContent>
+      {bySubject.length ? <div className="h-56 w-full text-primary" data-testid="chart-chapters-by-subject"><ResponsiveContainer width="100%" height="100%"><BarChart data={bySubject} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" /><XAxis dataKey="subject" tick={{ fontSize: 11 }} interval={0} /><YAxis tick={{ fontSize: 11 }} allowDecimals={false} /><Tooltip /><Legend wrapperStyle={{ fontSize: 12 }} /><Bar dataKey="total" name="Included" fill="currentColor" fillOpacity={0.25} radius={[4, 4, 0, 0]} /><Bar dataKey="complete" name="Complete" fill="currentColor" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div> : <p className="rounded-lg border border-dashed p-5 text-center text-sm text-muted-foreground">Add chapters to see this chart.</p>}
+    </CardContent></Card>
+  </div>;
+}
+
 function SyllabusPage() {
   const { data } = useStudy();
   if (!data) return <PageContent><div /></PageContent>;
@@ -377,7 +540,7 @@ function SyllabusPage() {
   const includedChapters = countableChapters(data);
   const totalComplete = includedChapters.filter((chapter) => chapter.status === 'complete').length;
   return <PageContent>
-    <PageHeading eyebrow="Your outline" title="Syllabus" description="Your own outline of subjects, papers, and chapters." action={<Button onClick={() => edit('subjects')} data-testid="button-add-subject"><Plus /> Add subject</Button>} />
+    <PageHeading title="Syllabus" description="Your own outline of subjects, papers, and chapters." action={<div className="flex flex-wrap gap-2"><SyllabusImportButton /><Button onClick={() => edit('subjects')} data-testid="button-add-subject"><Plus /> Add subject</Button></div>} />
     {data.subjects.some((subject) => subject.isProvisional) && <div className="mb-5 flex gap-3 rounded-lg border border-secondary bg-secondary/50 p-4 text-sm"><CircleHelp className="mt-0.5 size-4 shrink-0 text-primary" /><p><strong>Suggested subjects are provisional.</strong> They are editable suggestions only—not an official subject list. Add, rename, or delete any subject.</p></div>}
     <p className="mb-5 text-sm text-muted-foreground"><span className="font-medium text-foreground">{data.subjects.length}</span> subjects · <span className="font-medium text-foreground">{totalComplete} / {includedChapters.length}</span> included chapters complete{includedChapters.length ? ` · ${Math.round(totalComplete / includedChapters.length * 100)}%` : ''}</p>
     {data.subjects.length === 0 ? <EmptyBlock icon={<BookOpen />} title="Start with your subjects" description="Create a subject, then add papers and chapters using the outline you trust." action={<Button onClick={() => edit('subjects')}><Plus /> Add your first subject</Button>} /> : <div className="space-y-4">{data.subjects.map((subject) => {
@@ -388,7 +551,7 @@ function SyllabusPage() {
       return <Card key={subject.id} data-testid={`card-subject-${subject.id}`}><CardHeader className="flex-row items-start justify-between space-y-0"><div><div className="flex flex-wrap items-center gap-2"><CardTitle>{subject.name}</CardTitle>{subject.isProvisional && <Badge variant="outline">Provisional suggestion</Badge>}{subject.isArchived && <Badge variant="secondary">Archived · edit to restore</Badge>}</div><CardDescription className="mt-2">{chapters.length ? `${done} of ${included.length} included chapters complete` : 'No chapters added yet'}{subject.targetPercent != null ? ` · personal target ${subject.targetPercent}%` : ''}</CardDescription></div><div className="flex gap-1"><Button size="sm" variant="outline" onClick={() => edit('papers', { subjectId: subject.id } as unknown as EntityRecord)} data-testid={`button-add-paper-${subject.id}`}><Plus /> Paper</Button><Button size="sm" variant="outline" onClick={() => edit('chapters', { subjectId: subject.id } as unknown as EntityRecord)} data-testid={`button-add-chapter-${subject.id}`}><Plus /> Chapter</Button><Button size="icon" variant="ghost" aria-label="Edit subject" onClick={() => edit('subjects', subject as unknown as EntityRecord)} data-testid={`button-edit-subject-${subject.id}`}><Pencil /></Button><Button size="icon" variant="ghost" aria-label="Delete subject" onClick={() => deleteRecord('subjects', subject as unknown as EntityRecord)} data-testid={`button-delete-subject-${subject.id}`}><Trash2 /></Button></div></CardHeader>
          <CardContent>{chapters.length ? <div className="space-y-2">{chapters.map((chapter) => {
           const paper = papers.find((item) => item.id === chapter.paperId);
-           return <div key={chapter.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3" data-testid={`row-chapter-${chapter.id}`}><div className="min-w-0 flex-1"><p className="font-medium">{chapter.title}</p><p className="text-xs text-muted-foreground">{paper?.name ?? 'No paper assigned'}{chapter.source ? ` · ${chapter.source}` : ''}{chapter.syllabusVersion ? ` · ${chapter.syllabusVersion}` : ''}{chapter.lastVerifiedAt ? ` · checked ${prettyDate(chapter.lastVerifiedAt)}` : ''}{chapter.notes && ` · ${chapter.notes}`}</p></div><Badge variant={chapter.status === 'complete' ? 'default' : 'secondary'}>{titleCase(chapter.status)}</Badge>{chapter.isOptional && <Badge variant="outline">Optional</Badge>}{chapter.isExcluded && <Badge variant="outline">Excluded from progress</Badge>}{chapter.isArchived && <Badge variant="secondary">Archived · edit to restore</Badge>}<Badge variant="outline">{chapter.confidence == null ? 'Confidence not rated' : `Confidence ${chapter.confidence} / 5`}</Badge><Badge variant={chapter.isProvisional ? 'secondary' : 'outline'}>{chapter.isProvisional ? 'Provisional' : 'Verified by you'}</Badge><Button size="icon" variant="ghost" aria-label="Edit chapter" onClick={() => edit('chapters', chapter as unknown as EntityRecord)} data-testid={`button-edit-chapter-${chapter.id}`}><Pencil /></Button><Button size="icon" variant="ghost" aria-label="Delete chapter" onClick={() => deleteRecord('chapters', chapter as unknown as EntityRecord)} data-testid={`button-delete-chapter-${chapter.id}`}><Trash2 /></Button></div>;
+           return <div key={chapter.id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3" data-testid={`row-chapter-${chapter.id}`}><div className="min-w-0 flex-1"><p className="font-medium">{chapter.title}</p><p className="text-xs text-muted-foreground">{paper?.name ?? 'No paper assigned'}{chapter.source ? ` · ${chapter.source}` : ''}{chapter.syllabusVersion ? ` · ${chapter.syllabusVersion}` : ''}{chapter.lastVerifiedAt ? ` · checked ${prettyDate(chapter.lastVerifiedAt)}` : ''}{chapter.notes && ` · ${chapter.notes}`}</p></div><MarkReadControl chapter={chapter} /><Badge variant={chapter.status === 'complete' ? 'default' : 'secondary'}>{titleCase(chapter.status)}</Badge>{chapter.isOptional && <Badge variant="outline">Optional</Badge>}{chapter.isExcluded && <Badge variant="outline">Excluded from progress</Badge>}{chapter.isArchived && <Badge variant="secondary">Archived · edit to restore</Badge>}<Badge variant="outline">{chapter.confidence == null ? 'Confidence not rated' : `Confidence ${chapter.confidence} / 5`}</Badge><Badge variant={chapter.isProvisional ? 'secondary' : 'outline'}>{chapter.isProvisional ? 'Provisional' : 'Verified by you'}</Badge><Button size="icon" variant="ghost" aria-label="Edit chapter" onClick={() => edit('chapters', chapter as unknown as EntityRecord)} data-testid={`button-edit-chapter-${chapter.id}`}><Pencil /></Button><Button size="icon" variant="ghost" aria-label="Delete chapter" onClick={() => deleteRecord('chapters', chapter as unknown as EntityRecord)} data-testid={`button-delete-chapter-${chapter.id}`}><Trash2 /></Button></div>;
         })}</div> : <p className="rounded-lg border border-dashed p-5 text-center text-sm text-muted-foreground">No chapters yet. Add only the outline details you know.</p>}
           {papers.length > 0 && <div className="mt-4 flex flex-wrap gap-2 border-t pt-3">{papers.map((paper) => <span key={paper.id} className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs">{paper.name}{paper.isProvisional && ' · provisional'}<Button size="icon" variant="ghost" aria-label={`Edit ${paper.name}`} onClick={() => edit('papers', paper as unknown as EntityRecord)} data-testid={`button-edit-paper-${paper.id}`}><Pencil /></Button><Button size="icon" variant="ghost" aria-label={`Delete ${paper.name}`} onClick={() => deleteRecord('papers', paper as unknown as EntityRecord)} data-testid={`button-delete-paper-${paper.id}`}><X /></Button></span>)}</div>}
         </CardContent></Card>;
@@ -403,7 +566,7 @@ function PlannerPage() {
   const upcoming = data.tasks.filter((task) => task.date >= todayISO()).sort((a, b) => a.date.localeCompare(b.date) || priorityRank[a.priority] - priorityRank[b.priority]);
   const pastTasks = data.tasks.filter((task) => task.date < todayISO()).sort((a, b) => b.date.localeCompare(a.date) || priorityRank[a.priority] - priorityRank[b.priority]);
   const sessions = [...data.sessions].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-  return <PageContent><PageHeading eyebrow="Plan & log" title="Study" description="Tasks are intentions. Study sessions are logged activity; they are not automatically inferred from tasks." action={<div className="flex gap-2"><Button variant="outline" onClick={() => edit('sessions')} data-testid="button-add-session"><Clock3 /> Log session</Button><Button onClick={() => edit('tasks')} data-testid="button-add-task"><Plus /> Add task</Button></div>} />
+  return <PageContent><PageHeading title="Study" description="Tasks are plans. Sessions are what you actually studied." action={<div className="flex gap-2"><Button variant="outline" onClick={() => edit('sessions')} data-testid="button-add-session"><Clock3 /> Log session</Button><Button onClick={() => edit('tasks')} data-testid="button-add-task"><Plus /> Add task</Button></div>} />
     <div className="mb-5 flex flex-wrap gap-2">{[['/syllabus', 'Syllabus', BookOpen], ['/revision', 'Revision', RotateCcw], ['/exams', 'Exams', CalendarDays], ['/results', 'Results', Trophy], ['/reminders', 'Reminders', Bell]].map(([href, label, Icon]) => <Button key={href as string} variant="outline" size="sm" asChild><Link href={href as string}><Icon className="size-4" /> {label as string}</Link></Button>)}</div>
     <div className="mb-5"><StudyTimerCard data={data} updateData={update} /></div>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><MetricCard label="Upcoming tasks" value={`${upcoming.length}`} detail="planned by you" icon={<CalendarDays />} /><MetricCard label="Logged sessions" value={`${data.sessions.length}`} detail="actual entries, not estimates" icon={<Clock3 />} /><MetricCard label="Time logged" value={minutesLabel(data.sessions.reduce((sum, item) => sum + item.durationMinutes, 0))} detail="across all recorded sessions" icon={<Activity />} /></div>
@@ -458,11 +621,12 @@ function AnalyticsPage() {
     });
   const empty = !data.practices.length && !data.chapters.length && !data.revisions.length && !data.results.length && !data.sessions.length;
   const editPractice = (record?: EntityRecord) => window.dispatchEvent(new CustomEvent('open-editor', { detail: { kind: 'practices', record } }));
-  return <PageContent><PageHeading eyebrow="Your records, summarized" title="Analytics" description="Calculated only from records you entered." action={<Button onClick={() => editPractice()} data-testid="button-add-practice"><Plus /> Log practice</Button>} />
+  return <PageContent><PageHeading title="Analytics" description="Calculated only from records you entered." action={<Button onClick={() => editPractice()} data-testid="button-add-practice"><Plus /> Log practice</Button>} />
     {empty && <div className="mb-5"><EmptyBlock icon={<ChartNoAxesCombined />} title="Your analytics start with your records" description="Add chapters, practice sessions, revision items, exam results, or study sessions. Each measure will appear separately." /></div>}
     <h2 className="mb-3 text-lg font-semibold">Coverage & study activity</h2>
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Syllabus coverage" value={coverage === null ? '—' : `${coverage}%`} detail={chapterCount ? `${completed} of ${chapterCount} chapters marked complete` : 'No included chapters recorded'} icon={<BookOpen />} /><MetricCard label="Study logged" value={minutesLabel(data.sessions.reduce((sum, item) => sum + item.durationMinutes, 0))} detail={`${data.sessions.length} sessions logged`} icon={<Clock3 />} /><MetricCard label="Practice accuracy" value={accuracy === null ? '—' : `${accuracy}%`} detail={practiceCount ? `${correctCount} correct of ${practiceCount} questions` : data.practices.length ? 'No question counts entered' : 'No practice attempts recorded'} icon={<Check />} /><MetricCard label="Chapter confidence" value={chapterConfidence === null ? '—' : `${chapterConfidence} / 5`} detail={ratedChapters.length ? `self-rated across ${ratedChapters.length} chapters` : 'No chapter ratings recorded'} icon={<Activity />} /><MetricCard label="Practice self-rating" value={practiceConfidence === null ? '—' : `${practiceConfidence} / 5`} detail={data.practices.length ? `from ${data.practices.length} practice records` : 'No practice ratings recorded'} icon={<Activity />} /></div>
     <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><MetricCard label="Revision reviewed" value={data.revisions.length ? `${revisionReviewed} / ${data.revisions.length}` : '—'} detail={data.revisions.length ? 'revision records marked reviewed' : 'No revision items recorded'} icon={<RotateCcw />} /><MetricCard label="Exam results" value={resultPercent === null ? '—' : `${resultPercent}%`} detail={resultCount ? `combined score from ${resultCount} results (${totalScore} / ${totalMax})` : 'No exam results recorded'} icon={<Trophy />} /><MetricCard label="Practice records" value={`${data.practices.length}`} detail={`${practiceCount} total questions attempted`} icon={<FileText />} /></div>
+    <StudyCharts data={data} />
     <div className="mt-6 flex items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Practice log</h2><p className="text-sm text-muted-foreground">Accuracy and confidence are recorded independently for each attempt.</p></div><Button size="sm" variant="outline" onClick={() => editPractice()} data-testid="button-add-practice-inline"><Plus /> Add</Button></div>
     {data.practices.length === 0 ? <div className="mt-3"><EmptyBlock icon={<FileText />} title="No practice records" description="Record question counts and a separate confidence rating to start a meaningful practice summary." action={<Button onClick={() => editPractice()}><Plus /> Log practice</Button>} /></div> : <div className="mt-3 space-y-3">{[...data.practices].sort((a, b) => b.date.localeCompare(a.date)).map((practice) => {
       const subject = data.subjects.find((item) => item.id === practice.subjectId);
@@ -480,7 +644,7 @@ function AnalyticsPage() {
 }
 
 function MorePage() {
-  return <PageContent><PageHeading eyebrow="More tools" title="More" description="Keep the rest of your study records and preferences close at hand." /><div className="grid gap-3 sm:grid-cols-2">{MORE_ITEMS.map(({ href, label, detail, icon: Icon }) => <Link key={href} href={href} className="no-underline" data-testid={`link-more-${label.toLowerCase().replaceAll(' ', '-')}`}><Card className="h-full transition-colors hover:bg-muted/40"><CardContent className="flex items-center gap-4 p-5"><span className="flex size-11 items-center justify-center rounded-lg bg-primary/10 text-primary"><Icon className="size-5" /></span><span className="min-w-0 flex-1"><span className="block font-semibold text-foreground">{label}</span><span className="mt-1 block text-sm text-muted-foreground">{detail}</span></span><ChevronRight className="size-4 text-muted-foreground" /></CardContent></Card></Link>)}</div><div className="mt-5 rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground"><ShieldCheck className="mr-2 inline size-4 text-primary" />Study data stays in this browser. The app uses the network only to load or update its public files; there is no account or cloud sync.</div></PageContent>;
+  return <PageContent><PageHeading title="More" description="Keep the rest of your study records and preferences close at hand." /><div className="grid gap-3 sm:grid-cols-2">{MORE_ITEMS.map(({ href, label, detail, icon: Icon }) => <Link key={href} href={href} className="no-underline" data-testid={`link-more-${label.toLowerCase().replaceAll(' ', '-')}`}><Card className="h-full transition-colors hover:bg-muted/40"><CardContent className="flex items-center gap-4 p-5"><span className="flex size-11 items-center justify-center rounded-lg bg-primary/10 text-primary"><Icon className="size-5" /></span><span className="min-w-0 flex-1"><span className="block font-semibold text-foreground">{label}</span><span className="mt-1 block text-sm text-muted-foreground">{detail}</span></span><ChevronRight className="size-4 text-muted-foreground" /></CardContent></Card></Link>)}</div><div className="mt-5 rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground"><ShieldCheck className="mr-2 inline size-4 text-primary" />Study data stays in this browser. The app uses the network only to load or update its public files; there is no account or cloud sync.</div></PageContent>;
 }
 
 function RemindersPage() {
@@ -498,7 +662,7 @@ function RemindersPage() {
     .sort((a, b) => a.date.localeCompare(b.date));
   const hasItems = dueTasks.length + dueRevisions.length + upcomingExams.length > 0;
   return <PageContent>
-    <PageHeading eyebrow="In-app reminders" title="Reminders" description="This reminder center works without notification permission. It does not send background alerts." />
+    <PageHeading title="Reminders" description="Shown inside the app. Phone notifications come later." />
     {!hasItems && <div className="mb-5"><EmptyBlock icon={<Bell />} title="Nothing needs attention" description="Due tasks, reviews, and upcoming exams you enter will appear here." /></div>}
     <div className="space-y-6">
       <section><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">Due tasks</h2><Button size="sm" variant="outline" asChild><Link href="/planner">Open planner</Link></Button></div>{dueTasks.length ? <div className="space-y-2">{dueTasks.map((task) => <RecordCard key={task.id} title={task.title} detail={`${task.date < today ? `Overdue since ${prettyDate(task.date)}` : 'Due today'} · ${task.durationMinutes} min`} badge="Task" onEdit={() => window.dispatchEvent(new CustomEvent('open-editor', { detail: { kind: 'tasks', record: task } }))} kind="tasks" record={task as unknown as EntityRecord} />)}</div> : <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No unfinished tasks are due.</p>}</section>
@@ -512,7 +676,7 @@ function ExamsPage() {
   const { data } = useStudy();
   if (!data) return <PageContent><div /></PageContent>;
   const edit = (record?: EntityRecord) => window.dispatchEvent(new CustomEvent('open-editor', { detail: { kind: 'exams', record } }));
-  return <PageContent><PageHeading eyebrow="Entered by you" title="Exams" description="Only add dates you have verified yourself. This app does not supply official dates." action={<Button onClick={() => edit()} data-testid="button-add-exam"><Plus /> Add exam</Button>} />
+  return <PageContent><PageHeading title="Exams" description="Add only dates you have verified yourself." action={<Button onClick={() => edit()} data-testid="button-add-exam"><Plus /> Add exam</Button>} />
      {data.exams.length === 0 ? <EmptyBlock icon={<CalendarDays />} title="No exams added" description="Add an exam when you have a date and source. Dates can be marked confirmed or provisional." action={<Button onClick={() => edit()}><Plus /> Add an exam</Button>} /> : <div className="space-y-3">{data.exams.slice().sort((a, b) => a.date.localeCompare(b.date)).map((exam) => { const days = countdownDays(exam.date); const countdown = days < 0 ? `${Math.abs(days)} days ago` : days === 0 ? 'Today' : `${days} days left`; return <RecordCard key={exam.id} title={exam.title} detail={`${countdown} · ${examTypeLabels[exam.examType]} · ${prettyDate(exam.date)}${exam.startTime ? ` · ${exam.startTime}` : ''}${exam.venue ? ` · ${exam.venue}` : ''} · ${exam.subjectId ? data.subjects.find((s) => s.id === exam.subjectId)?.name ?? 'Subject removed' : 'All subjects'}${exam.source ? ` · ${exam.source}` : ''}`} badge={exam.dateStatus === 'confirmed' ? 'Confirmed by you' : 'Provisional date'} onEdit={() => edit(exam as unknown as EntityRecord)} kind="exams" record={exam as unknown as EntityRecord} />; })}</div>}
   </PageContent>;
 }
@@ -524,7 +688,6 @@ function RevisionPage() {
   const today = todayISO();
   const items = [...data.revisions].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const markReviewed = async (item: RevisionItem, result: 'hard' | 'okay' | 'easy') => {
-    const intervalDays = nextRevisionInterval(item.intervalDays, result);
     try {
       await update((current) => {
         const currentItem = current.revisions.find((revision) => revision.id === item.id);
@@ -535,28 +698,17 @@ function RevisionPage() {
           lastReviewedAt: today,
           reviewResult: result,
         };
-        const nextItem: RevisionItem = {
-          id: makeId(),
-          title: currentItem.title,
-          subjectId: currentItem.subjectId,
-          chapterId: currentItem.chapterId,
-          dueDate: addDhakaDays(today, intervalDays),
-          intervalDays,
-          lastReviewedAt: null,
-          status: 'scheduled',
-          reviewResult: null,
-        };
         return {
           ...current,
-          revisions: current.revisions.map((revision) => revision.id === item.id ? reviewed : revision).concat(nextItem),
+          revisions: current.revisions.map((revision) => revision.id === item.id ? reviewed : revision),
         };
       });
-      toast({ title: 'Revision saved', description: `Your next review is in ${intervalDays} day${intervalDays === 1 ? '' : 's'}.` });
+      toast({ title: 'Revision saved', description: `Recorded as ${result}.` });
     } catch (error) {
       toast({ title: 'Could not save revision', description: error instanceof Error ? error.message : 'Please try again.' });
     }
   };
-  return <PageContent><PageHeading eyebrow="Your review rhythm" title="Revision" description="Revision is tracked separately from syllabus coverage and practice accuracy." action={<Button onClick={() => edit()} data-testid="button-add-revision"><Plus /> Add revision</Button>} />
+  return <PageContent><PageHeading title="Revision" description="Reviews are tracked separately from coverage and accuracy." action={<Button onClick={() => edit()} data-testid="button-add-revision"><Plus /> Add revision</Button>} />
     {items.length === 0 ? <EmptyBlock icon={<RotateCcw />} title="No revision items yet" description="Schedule a review for a topic or chapter when it suits your plan." action={<Button onClick={() => edit()}><Plus /> Schedule revision</Button>} /> : <div className="space-y-3">{items.map((item) => { const due = item.status === 'due' || (item.dueDate <= today && item.status !== 'reviewed'); const subject = item.subjectId ? data.subjects.find((s) => s.id === item.subjectId)?.name : null; const chapter = item.chapterId ? data.chapters.find((c) => c.id === item.chapterId)?.title : null; return <Card key={item.id}><CardContent className="flex flex-wrap items-center gap-3 p-4"><span className={cn('flex size-10 items-center justify-center rounded-lg', due ? 'bg-secondary text-primary' : 'bg-muted text-muted-foreground')}><RotateCcw /></span><div className="min-w-0 flex-1"><p className="font-medium">{item.title}</p><p className="text-xs text-muted-foreground">{item.status === 'reviewed' && item.lastReviewedAt ? `Reviewed ${prettyDate(item.lastReviewedAt)} · ` : ''}{prettyDate(item.dueDate)} · every {item.intervalDays} days{subject ? ` · ${subject}` : ''}{chapter ? ` / ${chapter}` : ''}</p></div><Badge variant={item.status === 'reviewed' ? 'default' : due ? 'secondary' : 'outline'}>{item.status === 'reviewed' ? `Reviewed${item.reviewResult ? ` · ${titleCase(item.reviewResult)}` : ''}` : due ? 'Due' : 'Scheduled'}</Badge>{item.status !== 'reviewed' && due && <div className="flex flex-wrap gap-1" role="group" aria-label={`Record the result for ${item.title}`}><Button size="sm" variant="outline" onClick={() => void markReviewed(item, 'hard')} data-testid={`button-review-hard-${item.id}`}>Hard</Button><Button size="sm" variant="outline" onClick={() => void markReviewed(item, 'okay')} data-testid={`button-review-okay-${item.id}`}>Okay</Button><Button size="sm" variant="outline" onClick={() => void markReviewed(item, 'easy')} data-testid={`button-review-easy-${item.id}`}>Easy</Button></div>}<Button size="icon" variant="ghost" aria-label="Edit revision" onClick={() => edit(item as unknown as EntityRecord)} data-testid={`button-edit-revision-${item.id}`}><Pencil /></Button><Button size="icon" variant="ghost" aria-label="Delete revision" onClick={() => window.dispatchEvent(new CustomEvent('request-delete', { detail: { kind: 'revisions', record: item } }))} data-testid={`button-delete-revision-${item.id}`}><Trash2 /></Button></CardContent></Card>; })}</div>}
   </PageContent>;
 }
@@ -565,7 +717,7 @@ function ResultsPage() {
   const { data } = useStudy();
   if (!data) return <PageContent><div /></PageContent>;
   const edit = (record?: EntityRecord) => window.dispatchEvent(new CustomEvent('open-editor', { detail: { kind: 'results', record } }));
-  return <PageContent><PageHeading eyebrow="Scores you enter" title="Results" description="Exam scores are shown as their own records; they do not change practice accuracy or syllabus coverage." action={<Button onClick={() => edit()} data-testid="button-add-result"><Plus /> Add result</Button>} />
+  return <PageContent><PageHeading title="Results" description="Scores you enter. They don’t change accuracy or coverage." action={<Button onClick={() => edit()} data-testid="button-add-result"><Plus /> Add result</Button>} />
     {data.results.length === 0 ? <EmptyBlock icon={<Trophy />} title="No results recorded" description="Add a score after you receive it. Results are never prefilled or estimated." action={<Button onClick={() => edit()}><Plus /> Record a result</Button>} /> : <div className="space-y-3">{[...data.results].sort((a, b) => b.date.localeCompare(a.date)).map((result) => { const exam = result.examId ? data.exams.find((e) => e.id === result.examId) : null; const subject = result.subjectId ? data.subjects.find((s) => s.id === result.subjectId) : null; return <RecordCard key={result.id} title={result.title} detail={`${prettyDate(result.date)} · ${subject?.name ?? 'No subject'}${exam ? ` · ${exam.title}` : ''}`} badge={`${result.score} / ${result.maxScore} · ${Math.round(result.score / result.maxScore * 100)}%`} onEdit={() => edit(result as unknown as EntityRecord)} kind="results" record={result as unknown as EntityRecord} />; })}</div>}
   </PageContent>;
 }
@@ -618,7 +770,7 @@ function SettingsPage() {
       toast({ title: 'Backup restored', description: 'Your local study data was replaced.' });
     } catch (error) { toast({ title: 'Restore failed', description: error instanceof Error ? error.message : 'Please try again.' }); }
   };
-  return <PageContent><PageHeading eyebrow="Your device, your data" title="Settings" description="Your data stays in this browser. Export a backup to keep a copy." />
+  return <PageContent><PageHeading title="Settings" description="Your data stays in this browser. Export a backup to keep a copy." />
     <div className="grid gap-5 lg:grid-cols-2"><Card><CardHeader><CardTitle>Study preferences</CardTitle><CardDescription>Small preferences for your local planning space.</CardDescription></CardHeader><CardContent className="space-y-5">
       <div><Label htmlFor="daily-target">Daily study target (minutes)</Label><div className="mt-2 flex gap-2"><Input id="daily-target" type="number" min="0" max="1440" value={dailyTarget} onChange={(event) => setTarget(event.target.value)} data-testid="input-daily-target" /><Button variant="outline" onClick={() => void saveSettings({ dailyTargetMinutes: Math.min(1440, Math.max(0, Number(dailyTarget) || 0)) })} data-testid="button-save-target">Save</Button></div><p className="mt-2 text-xs text-muted-foreground">This goal is only a reference for your daily plan.</p></div>
       <div><Label htmlFor="theme-setting">Theme preference</Label><Select value={data.settings.theme} onValueChange={(value: 'system' | 'light' | 'dark') => void saveSettings({ theme: value })}><SelectTrigger id="theme-setting" className="mt-2" data-testid="select-theme"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="system">System</SelectItem><SelectItem value="light">Light</SelectItem><SelectItem value="dark">Dark</SelectItem></SelectContent></Select></div>
